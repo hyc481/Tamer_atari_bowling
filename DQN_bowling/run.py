@@ -1,30 +1,24 @@
-"""
-When training, use 'A' and 'D' keys for positive and negative rewards
-"""
+
 import gym
 import asyncio
 import torch
 from tamer.agent import DeepTamer, Encoder, Head
 
-
 async def main():
     env = gym.make("Bowling-v0", mode=2).unwrapped
-    env = gym.wrappers.TimeLimit(env, max_episode_steps=3500)
+    env = gym.wrappers.TimeLimit(env, max_episode_steps=4000)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     encoder = Encoder().to(device)
     head = Head().to(device)
-    # encoder.load_state_dict(torch.load("auto_encoder/Type_1/encoder.pt", map_location=device))
-    """
+    encoder.load_state_dict(torch.load("auto_encoder/Type_1/encoder.pt", map_location=device))
     for name, params in encoder.named_parameters():
         params.requires_grad = False
-    """
-    # hyperparameters
-    # encoder.eval()
+    encoder.eval()
     epsilon = 1
-    min_eps = 0.01
-    num_episodes = 300
-    batch = 32
+    min_eps = 0.05
+    num_episodes = 100
+    batch = 128
     tamer_training_time_step = 0.1
     agent = DeepTamer(env, encoder, head, num_episodes, batch,
                       tamer_training_time_step, epsilon, min_eps)

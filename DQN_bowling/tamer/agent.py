@@ -1,5 +1,4 @@
 from tamer.interface import Interface
-import time
 import pygame
 import pickle
 from itertools import count
@@ -26,9 +25,6 @@ loss_list = []
 class Encoder(nn.Module):
     def __init__(self):
         super(Encoder, self).__init__()
-        # in_channel, out_channel, kernel_size, stride=1, padding=0
-        # conv: height_out = (height_in - height_kernel + 2*padding) / stride + 1
-        # pool: height_out = (height_in - height_kernel) / stride + 1
         self.conv1 = nn.Conv2d(3, 64, 3, padding=1)
         self.conv2 = nn.Conv2d(64, 64, 3, padding=1)
         self.conv3 = nn.Conv2d(64, 1, 3, padding=1)
@@ -52,11 +48,10 @@ class Encoder(nn.Module):
 class Head(nn.Module):
     def __init__(self):
         super(Head, self).__init__()
-        self.linear_1 = nn.Linear(100, 64)
-        self.linear_2 = nn.Linear(64, 4)
+        self.linear_1 = nn.Linear(100, 16)
+        self.linear_2 = nn.Linear(16, 4)
 
     def forward(self, x):
-        x = x
         x = F.relu(self.linear_1(x))
         x = self.linear_2(x)
         return x
@@ -76,10 +71,11 @@ class BufferDeque:
     def push2(self, sample):
         self.memory2.append(sample)
 
+
 def random_sample(buffer, batch_size):
     rand_idx = np.random.randint(len(buffer), size=batch_size)
     rand_batch = [buffer[i] for i in rand_idx]
-    state, action, reward, nxt_state_ls, done_ls= [], [], [], [], []
+    state, action, reward, nxt_state_ls, done_ls = [], [], [], [], []
     for s, a, f, nxt_state, done in rand_batch:
         state.append(s)
         action.append(a)
@@ -90,14 +86,15 @@ def random_sample(buffer, batch_size):
 
 
 class FunctionApproximation:
-    def __init__(self, env, encoder, head):
+    def __init__(self, env, encoder, head, batch):
         self.env = env
-        self.encoder = encoder  # load weights
-        self.head = head  # training
+        self.encoder = encoder
+        self.head = head
         self.img_dims = (3, 160, 160)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.gamma = 0.9
-        self.opt = optim.Adam(list(self.head.parameters()), lr=2e-6)
+        self.gamma = 0.98
+        self.opt = optim.Adam(list(self.head.parameters()), lr=1e-3)
+        self.batch = batch
 
     def predict(self, f):
         output = self.head(f.to(self.device))
@@ -107,19 +104,19 @@ class FunctionApproximation:
         f = f.to(self.device)
         reward = reward.to(self.device)
         action = action.to(self.device)
-        h_hat = self.head(self.encoder(f))
+        h_hat = self.head(f)
         h_hat_s_a = h_hat.gather(1, action.unsqueeze(0).t()).t()[0]
-        H_hat_s_a = self.head(self.encoder(nxt_f)).max(dim=1)[0]
+        H_hat_s_a = self.head(nxt_f).max(dim=1)[0]
         y = []
-        for _ in range(32):
+        for _ in range(self.batch):
             if done_ls[_]:
                 y.append(reward[_])
             else:
-                y.append(H_hat_s_a[_]*self.gamma+reward[_])
+                y.append(H_hat_s_a[_] * self.gamma + reward[_])
         y = torch.stack(y)
         y = y.detach()
         self.opt.zero_grad()
-        loss = torch.mean((h_hat_s_a-y)**2)
+        loss = torch.mean((h_hat_s_a - y) ** 2)
         loss.backward()
         self.opt.step()
         loss_list.append(loss.cpu().item())
@@ -133,6 +130,16 @@ class FunctionApproximation:
                             T.ToTensor()])
         state = resize(state).to(self.device).unsqueeze(0)
         return state
+
+
+def reward_judge(reward):
+    if reward != 0:
+        if reward < 10:
+            return 2
+        else:
+            return 3
+    else:
+        return 0
 
 
 class DeepTamer:
@@ -151,37 +158,25 @@ class DeepTamer:
         self.ts_len = ts_len
         self.num_episodes = num_episodes
         self.episode = 0
-        self.H = FunctionApproximation(env, encoder, head)
         self.batch = batch
+        self.H = FunctionApproximation(env, encoder, head, self.batch)
         self.epsilon = epsilon
         self.min_eps = min_eps
-        self.buffer = BufferDeque(3000)
+        self.buffer = BufferDeque(20000)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.sliding_window = deque()
         self.t = 0
         self.reward_ls = []
         self.video_size = None
-        self.epsilon_step = 0.92
+        self.epsilon_step = 2e-5
 
-    def act(self, f, train):
-        #if np.random.random() < 1 - self.epsilon or not train:
-        if np.random.random() < 0.98 or not train:
-            predict = self.H.predict(f)
-            action = int(torch.argmax(predict))
-            #  if self.t % 20 == 0:
-                #  print(f"nn output{predict}")
-            return action
+    def act(self, f, train, idx):
+        random = True if np.random.random()< 0.3 else False
+        if train and random:
+            return np.random.randint(0, 4) if np.random.random() < self.epsilon\
+                else int(torch.argmax(self.H.predict(f)))
         else:
-            return np.random.randint(0, 4)
-
-    def reward_judge(self, reward):
-        if reward != 0:
-            if reward < 10:
-                return 2
-            else:
-                return 3
-        else:
-            return 0
+            return int(torch.argmax(self.H.predict(f)))
 
     def _train_episode(self, idx, disp, train, render=True):
         self.episode += 1
@@ -193,11 +188,13 @@ class DeepTamer:
             print(f'play Episode: {idx + 1}')
         tot_reward = 0
         obs = self.env.reset()
+        temp_buffer = []
         for _ in count():
             obs = obs.transpose((2, 0, 1))
             state = self.H.transfer(obs)
-            f = self.H.encoder(state)
-            action = self.act(f, train)
+            with torch.no_grad():
+                f = self.H.encoder(state)
+            action = self.act(f, train, idx)
             if not initialized and not train:
                 action = 1
                 initialized = True
@@ -206,37 +203,44 @@ class DeepTamer:
                 break
             tot_reward += reward
             nxt_state = self.H.transfer(nxt_obs.transpose((2, 0, 1)))
-            data = [state, action, self.t, nxt_state, done]
-            self.buffer.push2(data)
-            temp_buffer = []
-            if self.reward_judge(reward) and train:
-                for data in self.buffer.memory2:
-                    for i in range(self.reward_judge(reward)):
-                        if data[2]<self.t-40-i*135 and data[2]>self.t-(40+95)-i*135:
-                            data[2] = reward
-                            self.buffer.push1(data)
-                            temp_buffer.append(data)
-                for _ in range(5):
-                    state_, action_, reward_, nxt_state_, done_ls = random_sample(temp_buffer, self.batch)
-                    self.H.update1(state_, action_, reward_, nxt_state_, done_ls)
-                self.t = 0
-            if self.t > 450 and reward == 0 and train:
-                data = [state, action, -1, nxt_state, done]
+            with torch.no_grad():
+                nxt_f = self.H.encoder(nxt_state)
+            data = [f, action, self.t, nxt_f, done]
+            if train:
+                self.buffer.push2(data)
+                if reward_judge(reward):
+                    for data in self.buffer.memory2:
+                        for i in range(reward_judge(reward)):
+                            if self.t - 40 - i * 135 > data[2] > self.t - (40 + 95) - i * 135:
+                                data[2] = reward
+                                self.buffer.push1(data)
+                                temp_buffer.append(data)
+                    self.buffer.memory2.clear()
+                    for _ in range(100):
+                        f_, action_, reward_, nxt_f_, done_ls = random_sample(temp_buffer, self.batch)
+                        self.H.update1(f_, action_, reward_, nxt_f_, done_ls)
+                    temp_buffer = []
+                    self.t = 0
+            if self.t > 400 and reward == 0 and train:
+                data = [f, action, -10, nxt_f, done]
                 self.buffer.push1(data)
             if render:
                 self.env.render()
             disp.show_action(action)
             if train:
                 if len(self.buffer) > 40 and self.t % 5 == 0:
-                    state_, action_, reward_, nxt_state_, done_ls = random_sample(self.buffer.memory1, self.batch)
-                    loss = self.H.update1(state_, action_, reward_, nxt_state_, done_ls)
-                    if self.t%200 == 0:
+                    for i in range(20):
+                        state_, action_, reward_, nxt_state_, done_ls = random_sample(self.buffer.memory1, self.batch)
+                        loss = self.H.update1(state_, action_, reward_, nxt_state_, done_ls)
+                    if self.t % 250 == 0:
                         print(loss)
             self.t += 1
             if done:
-                # print(f'  Reward: {tot_reward}')
                 break
+                tot_reward += reward
             obs = nxt_obs
+            if self.epsilon > self.min_eps:
+                self.epsilon = self.epsilon-self.epsilon_step
         self.env.close()
         return tot_reward
 
@@ -246,7 +250,6 @@ class DeepTamer:
 
         for i in range(self.num_episodes):
             self._train_episode(i, disp, render=True, train=True)
-            self.epsilon = self.epsilon_step*self.epsilon
             print('offline')
             self.play(num=0)
 
@@ -287,58 +290,8 @@ class DeepTamer:
             play_reward_ls.append(self._train_episode(i, disp=disp, render=False, train=False))
         Sum = 0
         for reward in play_reward_ls:
-            Sum = Sum+reward
+            Sum = Sum + reward
         mean = temp
         print(f'score:{mean}')
         self.reward_ls.append(mean)
         self.env.close()
-
-
-class Crediter:
-    def __init__(self, windowSize):
-        self.lowerThreshold = windowSize[0]
-        self.upperThreshold = windowSize[1]
-        self.pd = 1 / (self.upperThreshold - self.lowerThreshold)
-        self.stack = []
-        self.minibatch = []
-        self.startTime = 0
-
-    def setStartTime(self):
-        self.startTime = time.time()
-
-    def stackUpdate(self, data):
-        """
-        Update the stack within the time window
-        """
-        self.stack.append(data)
-        while time.time() - self.upperThreshold > self.stack[0][2]:
-            self.startTime = self.stack[0][2]
-            self.stack.pop(0)
-
-    def minibatchUpdate(self, tf, feedback):
-        """
-        acquire minibatch
-        """
-        # timeLast represents the start time of the correspondent sample
-        self.minibatch = []
-        timeLast = self.startTime
-        for sample in self.stack:
-            if timeLast < tf - self.lowerThreshold:
-                x = [sample[0], sample[1]]
-                y = feedback
-                w = (sample[2] - timeLast) * self.pd
-                timeLast = sample[2]
-                self.minibatch.append([x, y, w])
-
-    def miniBatchProcess(self):
-        state = []
-        action = []
-        feedback = []
-        w = []
-        for sample in self.minibatch:
-            state.append(sample[0][0])
-            action.append(sample[0][1])
-            feedback.append(sample[1])
-            w.append(sample[2])
-        return torch.cat(state), torch.tensor(action), torch.tensor(feedback), torch.tensor(w)
-

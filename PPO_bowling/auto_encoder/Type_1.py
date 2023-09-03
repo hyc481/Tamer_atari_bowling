@@ -1,23 +1,19 @@
 import os
 import pathlib
 import random
-import warnings
 
 import gym
 import matplotlib.pyplot as plt
 import numpy as np
 
-# warnings.filterwarnings("ignore")
-
-from collections import deque
 from itertools import count
 
 import torch
 import torchvision
 import torchvision.utils
 import torch.nn as nn
-import torch.nn.functional as F
 import torchvision.transforms as T
+import torch.nn.functional as F
 import torch.optim as optim
 
 torch.manual_seed(0)
@@ -31,69 +27,47 @@ each state is 1 RGB image.
 class Encoder(nn.Module):
     def __init__(self):
         super(Encoder, self).__init__()
+        # in_channel, out_channel, kernel_size, stride=1, padding=0
+        # conv: height_out = (height_in - height_kernel + 2*padding) / stride + 1
+        # pool: height_out = (height_in - height_kernel) / stride + 1
+        self.conv1 = nn.Conv2d(3, 64, 3, padding=1)
+        self.conv2 = nn.Conv2d(64, 64, 3, padding=1)
+        self.conv3 = nn.Conv2d(64, 1, 3, padding=1)
 
-        self.conv1 = nn.Conv2d(3, 64, 3)
-        self.conv2 = nn.Conv2d(64, 64, 3)
-        self.conv3 = nn.Conv2d(64, 1, 3)
-
-        self.conv_bn1 = nn.BatchNorm2d(64)
+        self.conv_bn1 = nn.BatchNorm2d(64)   # channels
         self.conv_bn2 = nn.BatchNorm2d(1)
 
-        self.linear_1 = nn.Linear(64, 100)
 
     def forward(self, x):
-        """
-        x = x
-        x = F.max_pool2d(self.conv_bn1(self.conv1(x)), 2)
-        x = F.max_pool2d(self.conv_bn1(self.conv2(x)), 2)
-        x = F.max_pool2d(self.conv_bn1(self.conv2(x)), 2)
-        x = F.max_pool2d(self.conv_bn2(self.conv3(x)), 2)
+        x = torch.relu(self.conv_bn1(self.conv1(x))) #160*160
+        x = F.max_pool2d(x, 2)                       #80*80
+        x = torch.relu(self.conv_bn1(self.conv2(x))) #80*80
+        x = F.max_pool2d(x, 2)                       #40*40
+        x = torch.relu(self.conv_bn1(self.conv2(x))) #40*40
+        x = F.max_pool2d(x, 2)                       #20*20
+        x = torch.relu(self.conv_bn2(self.conv3(x))) #10*10
+        x = F.max_pool2d(x, 2)                       #10*10
         x = x.view(x.size(0), -1)
-        x = self.linear_1(x)
-        # encoded states might come in "-ve" so no Relu or softmax
         return x
-        """
-        x = self.conv_bn1(torch.relu(self.conv1(x)))
-        x = F.max_pool2d(x, 2)
-        x = self.conv_bn1(torch.relu(self.conv2(x)))
-        x = F.max_pool2d(x, 2)
-        x = self.conv_bn1(torch.relu(self.conv2(x)))
-        x = F.max_pool2d(x, 2)
-        x = self.conv_bn2(torch.relu(self.conv3(x)))
-        x = F.max_pool2d(x, 2)
-        x = x.view(x.size(0), -1)
-        x = torch.relu(self.linear_1(x))
-
-        return x
-
 
 class Decoder(nn.Module):
     # Linear - Reshape - Upsample - Deconv + BatchNorm
     def __init__(self):
         super(Decoder, self).__init__()
 
-        self.linear_1 = nn.Linear(100, 64)
-
-        self.upsample_1 = nn.Upsample(scale_factor=2)
-        self.upsample_2 = nn.Upsample(scale_factor=2.03)
-
-        self.deconv_1 = nn.ConvTranspose2d(1, 64, 3)
-        self.deconv_2 = nn.ConvTranspose2d(64, 64, 3)
-        self.deconv_3 = nn.ConvTranspose2d(64, 3, 3)
+        self.deconv_1 = nn.ConvTranspose2d(1, 64, 3, padding=1)
+        self.deconv_2 = nn.ConvTranspose2d(64, 64, 3, padding=1)
+        self.deconv_3 = nn.ConvTranspose2d(64, 3, 3, padding=1)
 
         self.deconv_bn1 = nn.BatchNorm2d(64)
         self.deconv_bn2 = nn.BatchNorm2d(3)
 
+        self.upsample_1 = nn.Upsample(scale_factor=2)
+        self.upsample_2 = nn.Upsample(scale_factor=2)
+
     def forward(self, x):
-        """
-        x = x
-        x = F.relu(self.linear_1(x))
-        x = x.view(x.shape[0], 1, 8, 8)
-        x = self.deconv_bn1(self.deconv_1(self.upsample_1(x)))
-        x = self.deconv_bn1(self.deconv_2(self.upsample_1(x)))
-        x = self.deconv_bn1(self.deconv_2(self.upsample_2(x)))
-        x = self.deconv_bn2(self.deconv_3(self.upsample_1(x)))
-        return x
+        # conv -----> Bn -----> Activate ----> Pool
+        # Up-Pool ----> DeConv  ----> BN ----> Activate
         """
         x = torch.relu(self.linear_1(x))
         x = x.view(x.shape[0], 1, 8, 8)
@@ -105,11 +79,21 @@ class Decoder(nn.Module):
         x = self.deconv_bn1(x)
         x = torch.relu(self.deconv_3(self.upsample_1(x)))
         x = self.deconv_bn2(x)
-        x = torch.sigmoid(x)  # sigmoid
+        x = torch.sigmoid(x)     # sigmoid
+        return x
+        """
+        x = x.view(x.shape[0], 1, 10, 10)
+        x = torch.relu(self.deconv_bn1(self.deconv_1(x)))
+        x = self.upsample_1(x)
+        x = torch.relu(self.deconv_bn1(self.deconv_2(x)))
+        x = self.upsample_1(x)
+        x = torch.relu(self.deconv_bn1(self.deconv_2(x)))
+        x = self.upsample_2(x)
+        x = torch.relu(self.deconv_bn2(self.deconv_3(x)))
+        x = self.upsample_1(x)
         return x
 
-
-class BufferArray():
+class BufferArray:
     def __init__(self, size):
         self.memory = torch.zeros(size, dtype=torch.float32)
         self._mem_loc = 0
@@ -129,43 +113,23 @@ class BufferArray():
     def random_sample(self, batch_size):
         rand_batch = np.random.randint(len(self.memory), size=batch_size)
         if len(rand_batch.shape) == 3:
-            return torch.unsqueeze(self.memory[rand_batch], axis=1)
+            return torch.stack(self.memory[rand_batch])
         return self.memory[rand_batch]
-
-
-class BufferDeque():
-    def __init__(self, size):
-        self.memory = deque(maxlen=size)
-
-    def __len__(self):
-        return len(self.memory)
-
-    def __getitem__(self, index):
-        if isinstance(index, tuple, list):
-            pointer = list(self.memory)
-            return [pointer[i] for i in index]
-        return list(self.memory[index])
-
-    def push(self, tensor):
-        self.memory.append(tensor.cpu())
-
-    def random_sample(self, batch_size):
-        rand_batch = np.random.randint(len(self.memory), size=batch_size)
-        return torch.stack([self.memory[b] for b in rand_batch])
 
 
 def main():
     env = gym.make("Bowling-v0").unwrapped
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    n_actions = env.action_space.n
-    no_of_episodes = 40  # 2000
+    # device = torch.device("cpu")
+    n_actions = env.action_space.n  # 6
+    no_of_episodes = 30  # 2000
     batch_size = 32
     img_dims = (3, 160, 160)
     buffer_size = (20000,) + img_dims
 
     def select_action():
-        action = torch.tensor([[random.randrange(n_actions)]], device=device, dtype=torch.long)
-        return action
+        a = torch.tensor([[random.randrange(n_actions)]], device=device, dtype=torch.long)
+        return a
 
     def get_screen():
         screen = env.render(mode="rgb_array").transpose((2, 0, 1))
@@ -174,10 +138,9 @@ def main():
         resize = T.Compose([T.ToPILImage(),
                             T.Resize((img_dims[1:])),
                             T.ToTensor()])
-        screen = resize(screen).to("cuda")  # .unsqueeze(0)
-        return screen  # Returns Grayscale, PILIMAGE, TENSOR
+        screen = resize(screen).to(device)
+        return screen  # Returns TENSOR
 
-    # buffer = BufferDeque(buffer_size[0])
     buffer = BufferArray(buffer_size)
     loss_fn = nn.MSELoss(reduction='mean')
     loss_history = []
@@ -200,25 +163,25 @@ def main():
 
         img_grid = torchvision.utils.make_grid(interleaved, nrow=2)
         plt.imshow(img_grid.permute(1, 2, 0))
-        plt.savefig(os.path.join(pathlib.Path().absolute(), 'Type_1/result_lili'))
+        plt.savefig(os.path.join(pathlib.Path().absolute(), 'Auto/result'))
+        plt.close()
 
     def loss_visual(x):
-        # plt.plot(x.detach().numpy())
         plt.plot(x)
-        plt.show()
-        plt.savefig(os.path.join(pathlib.Path().absolute(), 'Type_1/loss_history_lili'))
+        plt.xlabel("Step")
+        plt.ylabel("MSE Loss")
+        plt.title("Loss of Encoder-Decoder During Training")
+        plt.savefig(os.path.join(pathlib.Path().absolute(), 'Auto/loss_history'))
+        plt.close()
 
     def optimize():
-        # Sample batch and preprocess
         state_batch = buffer.random_sample(batch_size)
 
-        # Move state_batch to GPU and run through auto-encoder
         state_batch = state_batch.to(device)
-
         output_batch = decoder(encoder(state_batch))
 
         # Compute loss
-        loss = loss_fn(state_batch, output_batch).cpu()
+        loss = loss_fn(state_batch, output_batch).cpu()   # todo: ?
 
         # Optimize
         opt.zero_grad()
@@ -243,30 +206,32 @@ def main():
 
             # Store transition
             buffer.push(state)
-            # Set next state 
+            # Set next state
             state = next_state
 
-            # Optimization/training
-            # Don't start training until there are enough samples in memory
-            if len(buffer.memory) > 1000:
-                # Only train every certain number of steps
+            if buffer.push_count >= 20000:
                 if step % 16 == 0:
                     loss = optimize()
                     loss_history.append(loss.cpu().item())
                     print('Episode: {} Step: {} Loss: {:5f}'.format(episode, step, loss))
-            # Check if done
+                    '''
+                    print("Episode: {} Step: {} Loss: {:5f} GPU Memory: {} RAM: {:5f} Buffer Size: {}".format(
+                                        episode, step, loss, get_gpu_memory_map()[0]/1000, 
+                                        psutil.virtual_memory().available /  1024**3, len(buffer)
+                                        ))
+                    clear_output(wait=True)
+                    '''
+            # Check if down
             if done:
                 break
 
     image_visual()
-    print(loss_history)
     loss_visual(loss_history)
 
-    torch.save(encoder.state_dict(), 'Type_1//encoder1.pt')
-    torch.save(decoder.state_dict(), 'Type_1//decoder1.pt')
+
+    torch.save(encoder.state_dict(), 'Auto/encoder.pt')
+    torch.save(decoder.state_dict(), 'Auto/decoder.pt')
+
 
 if __name__ == "__main__":
     main()
-
-# SBATCH --mail-type=all
-# SBATCH --mail-user=<sarrabel@uncc.edu>

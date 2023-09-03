@@ -9,7 +9,7 @@ from tamer.agent import Agent, Encoder
 
 async def main():
     env = gym.make("Bowling-v0", mode=2).unwrapped
-    env = gym.wrappers.TimeLimit(env, max_episode_steps=5000)
+    env = gym.wrappers.TimeLimit(env, max_episode_steps=4000)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     encoder = Encoder().to(device)
@@ -18,11 +18,10 @@ async def main():
     for name, params in encoder.named_parameters():
         params.requires_grad = False
 
-    # hyperparameters
     encoder.eval()
 
     num_episodes = 50
-    epochs = 20
+    epochs = 40
     lmbda = 0.9
     eps = 0.075
     gamma = 0.98

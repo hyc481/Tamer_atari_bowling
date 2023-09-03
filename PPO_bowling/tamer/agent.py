@@ -136,23 +136,16 @@ class Agent:
         self.lmbda = lmbda
         self.eps = eps
         self.runningMeanStd = RunningMeanStd(1000)
-        self.h = None
-        self.load_model('auto_save7')
-        print('god bless')
 
     def act(self, f):
-        # probs = self.actor(f)
-        probs = self.h(f)
-        # 创建以probs为标准的概率分布
+        probs = self.actor(f)
         action_list = torch.distributions.Categorical(probs)
-        # 依据其概率随机挑选一个动作
         action = action_list.sample().item()
         return action
 
 
 
     def _train_episode(self, idx, disp, train, render=True):
-        # building dataset
         transition_dict = {
             'states': [],
             'actions': [],
@@ -210,7 +203,6 @@ class Agent:
                 }
             self.t += 1
             if done:
-                # print(f'  Reward: {tot_reward}')
                 break
             obs = nxt_obs
         self.env.close()
@@ -280,48 +272,30 @@ class Agent:
         next_states = torch.cat(transition_dict['next_states']).to(self.device)
         dones = torch.tensor(transition_dict['dones'], dtype=torch.float).to(self.device).view(-1, 1)
 
-        # 目标，下一个状态的state_value  [b,1]
         next_q_target = self.critic(next_states)
-        # 目标，当前状态的state_value  [b,1]
         td_target = rewards + self.gamma * next_q_target * (1 - dones)
-        # 预测，当前状态的state_value  [b,1]
         td_value = self.critic(states)
-        # 目标值和预测值state_value之差  [b,1]
         td_delta = td_target - td_value
 
-        # 时序差分值 tensor-->numpy  [b,1]
         td_delta = td_delta.cpu().detach().numpy()
-        advantage = 0  # 优势函数初始化
+        advantage = 0
         advantage_list = []
 
-        # 计算优势函数
-        for delta in td_delta[::-1]:  # 逆序时序差分值 axis=1轴上倒着取 [], [], []
-            # 优势函数GAE的公式
+        for delta in td_delta[::-1]:
             advantage = self.gamma * self.lmbda * advantage + delta
             advantage_list.append(float(advantage))
-        # 正序
         advantage_list.reverse()
-        # numpy --> tensor [b,1]
 
         advantage = torch.tensor(advantage_list, dtype=torch.float).to(self.device)
         advantage = (advantage-advantage.mean())/advantage.var()
-        # 策略网络给出每个动作的概率，根据action得到当前时刻下该动作的概率
         old_log_probs = torch.log(self.actor(states).gather(1, actions)).detach()
 
-        # 一组数据训练 epochs 轮
         for _ in range(self.epochs):
-            # 每一轮更新一次策略网络预测的状态
             log_probs = torch.log(self.actor(states).gather(1, actions))
-            # 新旧策略之间的比例
             ratio = torch.exp(log_probs - old_log_probs)
-            # 近端策略优化裁剪目标函数公式的左侧项
             surr1 = torch.mul(ratio.t(), advantage)
-            # 公式的右侧项，ratio小于1-eps就输出1-eps，大于1+eps就输出1+eps
             surr2 = torch.mul(torch.clamp(ratio, 1 - self.eps, 1 + self.eps).t(), advantage)
-
-            # 策略网络的损失函数
             actor_loss = torch.mean(-torch.min(surr1, surr2))
-            # 价值网络的损失函数，当前时刻的state_value - 下一时刻的state_value
             critic_loss = torch.mean(F.mse_loss(self.critic(states), td_target.detach()))
             """
             if _%3 == 0:
@@ -330,26 +304,11 @@ class Agent:
                 print('\n')
             """
 
-            # 梯度清0
             self.actor_optimizer.zero_grad()
             self.critic_optimizer.zero_grad()
-            # 反向传播
             actor_loss.backward()
             critic_loss.backward()
-            # 梯度更新
             self.actor_optimizer.step()
             self.critic_optimizer.step()
-
-    def load_model(self, filename):
-        """
-        Load H or Q model from models dir
-        Args:
-            filename: name of pickled file
-        """
-        filename = filename + '.p' if not filename.endswith('.p') else filename
-        with open(MODELS_DIR.joinpath(filename), 'rb') as f:
-            model = pickle.load(f)
-        self.h = model
-        self.h.eval()
 
 
