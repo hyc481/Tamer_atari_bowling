@@ -15,7 +15,7 @@ async def main():
     encoder = Encoder().to(device)
     head = Head().to(device)
     encoder.load_state_dict(torch.load("auto_encoder/Type_1/encoder.pt", map_location=device))
-    encoder.eval()
+    encoder = encoder.eval()
     for name, params in encoder.named_parameters():
         params.requires_grad = False
 

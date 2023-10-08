@@ -14,7 +14,7 @@ async def main():
     encoder.load_state_dict(torch.load("auto_encoder/Type_1/encoder.pt", map_location=device))
     for name, params in encoder.named_parameters():
         params.requires_grad = False
-    encoder.eval()
+    encoder = encoder.eval()
     epsilon = 1
     min_eps = 0.05
     num_episodes = 100

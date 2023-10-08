@@ -18,7 +18,7 @@ async def main():
     for name, params in encoder.named_parameters():
         params.requires_grad = False
 
-    encoder.eval()
+    encoder = encoder.eval()
 
     num_episodes = 50
     epochs = 40
